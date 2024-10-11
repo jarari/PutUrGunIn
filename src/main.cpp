@@ -15,8 +15,43 @@ REL::Relocation<float*> ptr_engineTime{ REL::ID(599343) };
 
 std::atomic<bool> threadLaunched = false;
 std::atomic<bool> abortThread = false;
-uint32_t targetFormID;
-uint32_t targetStackID = 0xFFFFFFFF;
+std::atomic<bool> equipLocked = false;
+uint32_t targetFormID = 0x0;
+
+void GetClipInfo(Actor* actor, float& currentTime, float& duration, std::string& clipName)
+{
+	if (actor->currentProcess) {
+		RE::BSAnimationGraphManager* graphManager = actor->currentProcess->middleHigh->animationGraphManager.get();
+		if (graphManager) {
+			RE::BShkbAnimationGraph* graph = graphManager->variableCache.graphToCacheFor.get();
+			if (graph) {
+				void* hkGraph = *(void**)((uintptr_t)graph + 0x378);
+				typedef RE::hkArray<void**, struct hkContainerHeapAllocator> nodeArray;
+				nodeArray* activeNodes = *(nodeArray**)((uintptr_t)hkGraph + 0xE0);
+				if (activeNodes && activeNodes->_size > 0) {
+					void** generatorArray = *activeNodes->_data;
+					while (*generatorArray) {
+						uintptr_t clip = (uintptr_t)(*generatorArray);
+						if (*(uint32_t*)(clip + 0x8)) {
+							currentTime = *(float*)(clip + 0x140);
+							clipName = std::string(*(const char**)(clip + 0x38));
+							if (currentTime) {
+								uintptr_t animCtrl = *(uintptr_t*)(clip + 0xD0);
+								if (animCtrl) {
+									uintptr_t animBinding = *(uintptr_t*)(animCtrl + 0x38);
+									uintptr_t anim = *(uintptr_t*)(animBinding + 0x18);
+									duration = *(float*)(anim + 0x14);
+									return;
+								}
+							}
+						}
+						generatorArray = (void**)((uintptr_t)generatorArray + 0x8);
+					}
+				}
+			}
+		}
+	}
+}
 
 bool HookedEquip(ActorEquipManager* a_manager, Actor* a_actor, BGSObjectInstanceT<TESBoundObject> a_obj, ObjectEquipParams& a_params)
 {
@@ -29,38 +64,44 @@ bool HookedEquip(ActorEquipManager* a_manager, Actor* a_actor, BGSObjectInstance
 		} else {
 			TESObjectWEAP* a_wep = static_cast<TESObjectWEAP*>(a_obj.object);
 			if (a_wep->weaponData.type != WEAPON_TYPE::kGrenade && a_wep->weaponData.type != WEAPON_TYPE::kMine && !(a_wep->weaponData.flags & 0x1A0000)) {	//Only run if the weapon has none of those flags set: Can't Drop, Not Playable, Embed Weapon
-				//logger::info("Equip targetFormID {:04X}, obj formID {:04X} flags {:04X}", targetFormID, a_obj.object->formID, a_wep->weaponData.flags);
-				if (a_obj.object->formID == targetFormID && a_params.a_stackID == targetStackID) {
+				//logger::info("Equip obj formID {:04X} flags {:04X}", a_obj.object->formID, a_wep->weaponData.flags);
+				if (equipLocked && a_actor->weaponState <= WEAPON_STATE::kDrawing && targetFormID == a_obj.object->formID) {
 					bool expected = false;
 					if (threadLaunched.compare_exchange_strong(expected, true)) {
 						a_actor->weaponState = WEAPON_STATE::kDrawing;
 						//logger::info("Equip thread launch");
 						std::jthread([a_actor, a_obj]() {
-							std::this_thread::sleep_for(std::chrono::milliseconds(250));
-							while (!abortThread && a_actor && a_actor->currentProcess &&
-								a_actor->currentProcess->middleHigh->requestedWeaponSubGraphID.size() &&
-								a_actor->currentProcess->middleHigh->currentWeaponSubGraphID[1].identifier != a_actor->currentProcess->middleHigh->requestedWeaponSubGraphID[1].identifier &&
-								a_actor->weaponState != WEAPON_STATE::kDrawn) {
-								//logger::info("requested ID {:08X}", a_actor->currentProcess->middleHigh->requestedWeaponSubGraphID[1].identifier);
+							float currentTime = 0.f, duration = FLT_MAX;
+							std::string clipName = "";
+							GetClipInfo(a_actor, currentTime, duration, clipName);
+							while ((!abortThread && a_actor && a_actor->currentProcess) &&
+								(a_actor->currentProcess->middleHigh->requestedWeaponSubGraphID.size() ||
+								a_actor->weaponState == WEAPON_STATE::kDrawing ||
+								(a_actor->weaponState == WEAPON_STATE::kDrawn && duration - currentTime >= 0.7f))) {
+								//logger::info("requested ID {:08X} time left {}", a_actor->currentProcess->middleHigh->requestedWeaponSubGraphID[1].identifier, duration - currentTime);
+								GetClipInfo(a_actor, currentTime, duration, clipName);
 								std::this_thread::sleep_for(std::chrono::milliseconds(50));
 							}
+							//logger::info("Equip complete");
+							targetFormID = 0x0;
+							equipLocked = false;
 							threadLaunched = false;
 						}).detach();
 					}
-				} else if (a_actor->weaponState == WEAPON_STATE::kDrawn) {
+				} else if (!equipLocked && a_actor->weaponState == WEAPON_STATE::kDrawn) {
 					bool expected = false;
 					if (threadLaunched.compare_exchange_strong(expected, true)) {
 						//logger::info("Unequip thread launch");
 						abortThread = false;
-						targetStackID = a_params.a_stackID;
 						if (a_actor->NotifyAnimationGraphImpl("Unequip")) {
+							equipLocked = true;
+							targetFormID = a_obj.object->formID;
 							std::jthread([a_actor, a_obj]() {
 								while (!abortThread && a_actor && a_actor->weaponState != WEAPON_STATE::kSheathed) {
 									std::this_thread::sleep_for(std::chrono::milliseconds(10));
 								}
 								//logger::info("Unequip done");
 								threadLaunched = false;
-								targetFormID = a_obj.object->formID;
 								F4SE::GetTaskInterface()->AddTask([a_actor, a_obj]() {
 									if (!abortThread) {
 										//logger::info("Equip item");
@@ -71,16 +112,24 @@ bool HookedEquip(ActorEquipManager* a_manager, Actor* a_actor, BGSObjectInstance
 									}
 								});
 							}).detach();
+							return false;
 						} else {
 							//logger::info("Unequip not fired");
 							abortThread = true;
-							targetFormID = 0x0;
-							targetStackID = 0xFFFFFFFF;
+							equipLocked = false;
 							threadLaunched = false;
+							targetFormID = 0x0;
+							float currentTime = 0.f, duration = FLT_MAX;
+							std::string clipName = "";
+							GetClipInfo(a_actor, currentTime, duration, clipName);
+							if (clipName == "WPNEquip" || clipName == "WPNEquipFast") {
+								//logger::info("Clip was equip");
+								return false;
+							}
 						}
 					}
-					return false;
-				} else {
+				} else if (equipLocked) {
+					//logger::info("Equip locked");
 					return false;
 				}
 			}
@@ -145,6 +194,15 @@ extern "C" DLLEXPORT bool F4SEAPI F4SEPlugin_Load(const F4SE::LoadInterface * a_
 	DetourUpdateThread(GetCurrentThread());
 	DetourAttach(&(PVOID&)ActorEquipManager_EquipOrig, HookedEquip);
 	DetourTransactionCommit();
+
+	const F4SE::MessagingInterface* message = F4SE::GetMessagingInterface();
+	message->RegisterListener([](F4SE::MessagingInterface::Message* msg) -> void {
+		if (msg->type == F4SE::MessagingInterface::kPostLoadGame || msg->type == F4SE::MessagingInterface::kNewGame) {
+			abortThread = true;
+			equipLocked = false;
+			targetFormID = 0x0;
+		}
+	});
 
 	return true;
 }
