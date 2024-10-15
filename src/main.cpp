@@ -77,7 +77,7 @@ bool HookedEquip(ActorEquipManager* a_manager, Actor* a_actor, BGSObjectInstance
 							while ((!abortThread && a_actor && a_actor->currentProcess) &&
 								(a_actor->currentProcess->middleHigh->requestedWeaponSubGraphID.size() ||
 								a_actor->weaponState == WEAPON_STATE::kDrawing ||
-								(a_actor->weaponState == WEAPON_STATE::kDrawn && duration - currentTime >= 0.7f))) {
+								(a_actor->weaponState == WEAPON_STATE::kDrawn && duration - currentTime >= 0.7f && clipName.find("WPNEquip") != std::string::npos))) {
 								//logger::info("requested ID {:08X} time left {}", a_actor->currentProcess->middleHigh->requestedWeaponSubGraphID[1].identifier, duration - currentTime);
 								GetClipInfo(a_actor, currentTime, duration, clipName);
 								std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -97,8 +97,16 @@ bool HookedEquip(ActorEquipManager* a_manager, Actor* a_actor, BGSObjectInstance
 							equipLocked = true;
 							targetFormID = a_obj.object->formID;
 							std::jthread([a_actor, a_obj]() {
+								int retryTimer = 0;
 								while (!abortThread && a_actor && a_actor->weaponState != WEAPON_STATE::kSheathed) {
 									std::this_thread::sleep_for(std::chrono::milliseconds(10));
+									++retryTimer;
+									if (retryTimer >= 20) {
+										F4SE::GetTaskInterface()->AddTask([a_actor]() {
+											a_actor->NotifyAnimationGraphImpl("Unequip");
+										});
+										retryTimer = 0;
+									}
 								}
 								//logger::info("Unequip done");
 								threadLaunched = false;
