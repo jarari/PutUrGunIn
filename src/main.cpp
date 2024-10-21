@@ -17,6 +17,7 @@ std::atomic<bool> threadLaunched = false;
 std::atomic<bool> abortThread = false;
 std::atomic<bool> equipLocked = false;
 uint32_t targetFormID = 0x0;
+uint32_t targetStack = 0;
 
 void GetClipInfo(Actor* actor, float& currentTime, float& duration, std::string& clipName)
 {
@@ -84,6 +85,7 @@ bool HookedEquip(ActorEquipManager* a_manager, Actor* a_actor, BGSObjectInstance
 							}
 							//logger::info("Equip complete");
 							targetFormID = 0x0;
+							targetStack = 0;
 							equipLocked = false;
 							threadLaunched = false;
 						}).detach();
@@ -96,6 +98,8 @@ bool HookedEquip(ActorEquipManager* a_manager, Actor* a_actor, BGSObjectInstance
 						if (a_actor->NotifyAnimationGraphImpl("Unequip")) {
 							equipLocked = true;
 							targetFormID = a_obj.object->formID;
+							targetStack = a_params.a_stackID;
+							//logger::info("Target stack {}", targetStack);
 							std::jthread([a_actor, a_obj]() {
 								int retryTimer = 0;
 								while (!abortThread && a_actor && a_actor->weaponState != WEAPON_STATE::kSheathed) {
@@ -116,7 +120,7 @@ bool HookedEquip(ActorEquipManager* a_manager, Actor* a_actor, BGSObjectInstance
 										if (a_actor->currentProcess) {
 											*(bool*)((uintptr_t)a_actor->currentProcess->high + 0x57B) = true;
 										}
-										ActorEquipManager::GetSingleton()->EquipObject(a_actor, a_obj, 0, 1, nullptr, true, false, false, false, false);
+										ActorEquipManager::GetSingleton()->EquipObject(a_actor, a_obj, targetStack, 1, nullptr, true, false, false, false, false);
 									}
 								});
 							}).detach();
@@ -127,6 +131,7 @@ bool HookedEquip(ActorEquipManager* a_manager, Actor* a_actor, BGSObjectInstance
 							equipLocked = false;
 							threadLaunched = false;
 							targetFormID = 0x0;
+							targetStack = 0;
 							float currentTime = 0.f, duration = FLT_MAX;
 							std::string clipName = "";
 							GetClipInfo(a_actor, currentTime, duration, clipName);
